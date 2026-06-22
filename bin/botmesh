@@ -1,0 +1,190 @@
+#!/bin/sh
+# botmesh — async multi-agent coordination over git notes.
+#
+# Agents working in parallel record WHY each commit happened — chosen approach,
+# rejected alternatives, gotchas — as a prose note attached to the commit. A
+# parallel agent then learns that context with 'brief' instead of re-reading
+# the diff and re-deriving (or re-litigating) conclusions someone already made.
+#
+# Notes are plain prose on a dedicated ref, so they're readable with no botmesh:
+#   git log --notes=botmesh/decisions
+#
+# TWO TOPOLOGIES (same commands, switched by BOTMESH_GIT_DIR):
+#   * In-repo  — run inside the code repo. Notes live there; linked worktrees
+#                share the ref store, so sibling agents see notes immediately.
+#   * Hub repo — set BOTMESH_GIT_DIR=/path/to/botmesh-myproject.git. Notes live
+#                in that hub, keyed by the code-commit SHAs (git lets a note
+#                point at a commit object the hub has never seen). The code repo
+#                stays pristine; the hub can be pruned/rewritten freely.
+set -eu
+
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+. "$here/../lib/common.sh"
+
+need_cmd git
+
+# Identity recorded in the Decided-by trailer.
+FROM=${BOTMESH_FROM:-${USER:-unknown}-bot}
+# Notes ref holding decision notes (prose).
+DECIDE_REF=${BOTMESH_DECIDE_REF:-refs/notes/botmesh/decisions}
+SELF="$here/botmesh"
+
+# git wrapper. With BOTMESH_GIT_DIR set we operate on the hub repo for notes
+# while still reading commits/refs from wherever we were invoked; without it we
+# just use the surrounding repo for everything.
+HUB=${BOTMESH_GIT_DIR:-}
+ng() {  # "notes git" — the repo that stores the notes
+  if [ -n "$HUB" ]; then git --git-dir="$HUB" "$@"; else git "$@"; fi
+}
+
+in_repo() { git rev-parse --git-dir >/dev/null 2>&1; }
+
+# Resolve a commit-ish to a full SHA using the code repo (the surrounding repo).
+resolve() { git rev-parse --verify "$1^{commit}" 2>/dev/null; }
+
+short() { printf '%s' "$1" | cut -c1-7; }
+
+usage() {
+  cat >&2 <<EOF
+usage: botmesh <command> [args]
+
+  decide [--at <commit>] [text]
+        Attach a decision note to a commit (default HEAD). Text from args or
+        stdin. Record WHY: chosen approach, rejected alternatives, gotchas.
+
+  commit --why <text> [git commit args...]
+        git commit, then attach <text> as the decision note — one repeatable
+        step. The way agents should commit. --why may also come from stdin.
+
+  brief <ref> [<base>]
+        Print decision notes for commits in <base>..<ref>, oldest first
+        (default base = HEAD). Learn a parallel agent's context without
+        re-reading their diff.
+
+  show [<commit>]            print the decision note on one commit (default HEAD)
+  log                        all commits carrying a decision note, newest first
+  require-decision [<commit>]  exit non-zero if <commit> has no decision note
+  install-hooks              install a post-commit nudge for missing decisions
+
+Identity: BOTMESH_FROM (default \$USER-bot).
+Storage:  BOTMESH_GIT_DIR=/path/to/hub.git keeps notes in a separate hub repo,
+          keyed by code-commit SHAs; unset = notes in the surrounding repo.
+          BOTMESH_DECIDE_REF overrides the notes ref.
+
+Notes are prose on $DECIDE_REF. Read without botmesh:
+  git log --notes=${DECIDE_REF#refs/notes/}
+EOF
+  exit 2
+}
+
+# Append a prose decision note (body + attribution trailer) to a commit.
+append_note() {
+  commit=$1 body=$2
+  when=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  printf '%s\n\nDecided-by: %s\nDecided-at: %s\n' "$body" "$FROM" "$when" \
+    | ng notes --ref="$DECIDE_REF" append -F - "$commit"
+}
+
+cmd=${1:-}
+[ -n "$cmd" ] || usage
+shift || true
+
+case "$cmd" in
+  decide)
+    in_repo || die "decide must run inside a git repo"
+    at=HEAD
+    if [ "${1:-}" = "--at" ]; then at=${2:?--at needs a commit}; shift 2; fi
+    commit=$(resolve "$at") || die "no such commit: $at"
+    if [ "$#" -gt 0 ]; then body=$*; else
+      [ -t 0 ] && die "decide needs text (args or stdin)"; body=$(cat)
+    fi
+    [ -n "$body" ] || die "empty decision text"
+    append_note "$commit" "$body"
+    log "decision noted on $(short "$commit") by $FROM"
+    ;;
+
+  commit)
+    in_repo || die "commit must run inside a git repo"
+    # Pull --why out; everything else passes through to git commit verbatim.
+    # Rebuild positional params with no eval (whitespace-safe).
+    why=
+    n=$#
+    while [ "$n" -gt 0 ]; do
+      arg=$1; shift
+      case "$arg" in
+        --why)   why=${1:?--why needs text}; shift; n=$((n - 2)); continue ;;
+        --why=*) why=${arg#--why=};          n=$((n - 1)); continue ;;
+        *) set -- "$@" "$arg"; n=$((n - 1)) ;;
+      esac
+    done
+    [ -n "$why" ] || { [ -t 0 ] && die "commit needs --why <text> (or pipe it on stdin)"; why=$(cat); }
+    [ -n "$why" ] || die "empty decision rationale"
+    git commit "$@" || die "git commit failed; no decision recorded"
+    head=$(git rev-parse HEAD)
+    append_note "$head" "$why"
+    log "committed $(short "$head") with decision by $FROM"
+    ;;
+
+  brief)
+    in_repo || die "brief must run inside a git repo"
+    ref=${1:?usage: brief <ref> [base]}
+    base=${2:-HEAD}
+    git rev-parse --verify "$ref" >/dev/null 2>&1 || die "no such ref: $ref"
+    range="$ref"
+    git rev-parse --verify "$base" >/dev/null 2>&1 && range="$base..$ref"
+    any=
+    for c in $(git rev-list --reverse "$range" 2>/dev/null); do
+      note=$(ng notes --ref="$DECIDE_REF" show "$c" 2>/dev/null) || continue
+      any=1
+      printf '— %s  %s\n' "$(short "$c")" "$(git log -1 --format=%s "$c")"
+      printf '%s\n\n' "$note" | sed 's/^/    /'
+    done
+    [ -n "$any" ] || log "no decision notes in $range"
+    ;;
+
+  show)
+    in_repo || die "show must run inside a git repo"
+    commit=$(resolve "${1:-HEAD}") || die "no such commit"
+    ng notes --ref="$DECIDE_REF" show "$commit" 2>/dev/null \
+      || die "no decision note on $(short "$commit")"
+    ;;
+
+  log)
+    in_repo || die "log must run inside a git repo"
+    # Each notes-ref entry is a blob named after the commit it annotates.
+    ng notes --ref="$DECIDE_REF" list 2>/dev/null | awk '{print $2}' | while read -r c; do
+      [ -n "$c" ] || continue
+      printf '— %s  %s\n' "$(short "$c")" "$(git log -1 --format=%s "$c" 2>/dev/null || echo '(unknown commit)')"
+    done
+    ;;
+
+  require-decision)
+    in_repo || die "require-decision must run inside a git repo"
+    commit=$(resolve "${1:-HEAD}") || die "no such commit"
+    ng notes --ref="$DECIDE_REF" show "$commit" >/dev/null 2>&1 \
+      || die "commit $(short "$commit") has no decision note — run 'botmesh decide' or commit via 'botmesh commit --why'"
+    ;;
+
+  install-hooks)
+    in_repo || die "install-hooks must run inside a git repo"
+    hdir=$(git rev-parse --git-path hooks 2>/dev/null) || die "cannot locate hooks dir"
+    mkdir -p "$hdir"
+    hook="$hdir/post-commit"
+    # post-commit, not pre-commit: the note attaches to the new commit's SHA,
+    # which doesn't exist until the commit completes. We nudge loudly rather
+    # than unwind a finished commit; 'botmesh commit --why' is the path that
+    # never forgets.
+    {
+      printf '#!/bin/sh\n'
+      printf '# botmesh: nudge for a decision note on every commit.\n'
+      printf '%s require-decision HEAD >/dev/null 2>&1 || \\\n' "$SELF"
+      printf '  printf "botmesh: no decision note on this commit — run: botmesh decide\\n" >&2\n'
+    } > "$hook"
+    chmod +x "$hook"
+    log "installed $hook"
+    ;;
+
+  *)
+    usage
+    ;;
+esac

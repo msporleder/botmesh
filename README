@@ -1,0 +1,64 @@
+# botmesh
+
+Async multi-agent coordination over git notes.
+
+When several agents (or people) work a codebase in parallel, each commit hides a
+*why*: the approach chosen, the alternatives rejected, the gotcha discovered.
+botmesh records that rationale as a prose note attached to the commit. A
+parallel agent then learns the context with one command — instead of re-reading
+the diff and re-deriving (or re-litigating) a conclusion someone already made.
+
+It is a thin wrapper over `git notes`. No server, no daemon, no dependencies
+beyond `git` and a POSIX shell. The notes are plain prose, so they're readable
+with no botmesh at all:
+
+    git log --notes=botmesh/decisions
+
+## Use
+
+    # Commit and record why, in one step (the way agents should commit):
+    botmesh commit --why "Chose flock over mkdir-lock; stale dirs on SIGKILL." -m "lock fix"
+
+    # Or attach a decision to an existing commit:
+    botmesh decide --at HEAD "Rejected the cache; correctness > the 5ms."
+
+    # Catch up on a parallel agent's branch without reading its diff:
+    botmesh brief agent-B main        # decisions in main..agent-B, oldest first
+
+    # Inspect:
+    botmesh show [<commit>]           # the note on one commit
+    botmesh log                       # every commit carrying a decision note
+
+## Enforce it (so agents actually use it)
+
+Each step is one repeatable command; enforcement just picks where it fires:
+
+    botmesh commit --why ...          # wrapper: can't commit without deciding
+    botmesh require-decision HEAD      # check: non-zero if a commit lacks a note
+    botmesh install-hooks             # post-commit nudge when a note is missing
+
+The wrapper is the path that never forgets. The hook is a net for raw `git
+commit` — it nudges (post-commit, since the note needs the new commit's SHA)
+rather than blocking. On the read side, point your agent's setup at
+`botmesh brief <their-branch>` so the context lands in its prompt.
+
+## Two topologies (same commands)
+
+- **In-repo** (default): run inside the code repo. Notes live there; linked
+  git worktrees share the ref store, so sibling agents see each other's notes
+  immediately — no push, no network.
+- **Hub repo**: `export BOTMESH_GIT_DIR=/path/to/botmesh-myproject.git`. Notes
+  live in that hub, keyed by the code-commit SHAs (git happily attaches a note
+  to a commit the hub has never seen). The code repo stays pristine and the hub
+  can be pruned or rewritten freely.
+
+## Config
+
+    BOTMESH_FROM         identity in the Decided-by trailer (default: $USER-bot)
+    BOTMESH_GIT_DIR      hub repo for notes; unset = the surrounding repo
+    BOTMESH_DECIDE_REF   notes ref (default: refs/notes/botmesh/decisions)
+
+## Layout
+
+    bin/botmesh      the CLI
+    lib/common.sh    die / log / need_cmd helpers
