@@ -65,6 +65,9 @@ usage: botmesh <command> [args]
   log                        all commits carrying a decision note, newest first
   require-decision [<commit>]  exit non-zero if <commit> has no decision note
   install-hooks              install a post-commit nudge for missing decisions
+  sync [<remote>]            fetch + merge + push decision notes (default
+                             remote: origin). git does NOT sync notes on its
+                             own — run this to share decisions across clones.
 
 Identity: BOTMESH_FROM (default \$USER-bot).
 Storage:  BOTMESH_GIT_DIR=/path/to/hub.git keeps notes in a separate hub repo,
@@ -182,6 +185,29 @@ case "$cmd" in
     } > "$hook"
     chmod +x "$hook"
     log "installed $hook"
+    ;;
+
+  sync)
+    in_repo || die "sync must run inside a git repo"
+    remote=${1:-origin}
+    git rev-parse --verify "$DECIDE_REF" >/dev/null 2>&1 \
+      || die "no local notes at $DECIDE_REF yet — record a decision first"
+    refspec="$DECIDE_REF:$DECIDE_REF"
+    # Fetch the remote's notes into a temp ref, then union-merge so concurrent
+    # decisions on the same commit are both kept (prose stays intact, unlike
+    # cat_sort_uniq which would shuffle lines). Tolerate a remote with no notes.
+    tmpref="refs/notes/bm-sync-tmp"
+    if ng fetch -q "$remote" "+$DECIDE_REF:$tmpref" 2>/dev/null \
+       && ng rev-parse --verify "$tmpref" >/dev/null 2>&1; then
+      if ! ng notes --ref="$DECIDE_REF" merge -s union "$tmpref" >/dev/null 2>&1; then
+        ng notes --ref="$DECIDE_REF" merge --abort >/dev/null 2>&1 || true
+        ng update-ref -d "$tmpref" 2>/dev/null || true
+        die "notes merge conflict on sync — resolve manually, then re-run"
+      fi
+      ng update-ref -d "$tmpref" 2>/dev/null || true
+    fi
+    ng push -q "$remote" "$refspec" || die "push to $remote failed"
+    log "synced decision notes with $remote"
     ;;
 
   *)
