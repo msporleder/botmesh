@@ -1,0 +1,6 @@
+Initial commit. botmesh is a thin git-notes wrapper for async multi-agent coordination: agents record WHY each commit happened as prose decision notes, and read a parallel agent's context via 'brief' instead of re-deriving from the diff.
+
+Scoped deliberately to git only — earlier explorations of a pluggable chat bus (local/sqs adapters, base64 envelopes, TTL, per-peer archives) were ripped out. git notes give us a serverless, dependency-free transport where every clone/worktree is already a peer. Rejected base64 envelopes for notes since prose keeps 'git log --notes' human-readable, which is the point.
+
+Decided-by: claude
+Decided-at: 2026-06-22T17:30:44Z
