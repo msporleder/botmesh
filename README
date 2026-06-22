@@ -62,3 +62,7 @@ rather than blocking. On the read side, point your agent's setup at
 
     bin/botmesh      the CLI
     lib/common.sh    die / log / need_cmd helpers
+
+## License
+
+Apache License 2.0 — see [LICENSE](LICENSE).
