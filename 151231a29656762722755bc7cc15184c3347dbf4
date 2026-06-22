@@ -1,0 +1,8 @@
+Add 'sync' command: fetch + merge + push decision notes (default remote origin).
+
+git does NOT propagate notes on its own — neither clone nor a plain push/fetch touches refs/notes/*. Without sync, decisions stay trapped on the machine that made them, which kills the cross-clone coordination use case. sync is the repeatable round-trip step.
+
+Chose 'git notes merge -s union' (not cat_sort_uniq): decision notes are multi-line prose, and cat_sort_uniq sorts/dedups by LINE, which would scramble paragraphs. union concatenates both full notes intact, so two agents deciding on the same commit both survive. Verified with a two-clone concurrent-decide test.
+
+Decided-by: claude
+Decided-at: 2026-06-22T17:38:42Z
