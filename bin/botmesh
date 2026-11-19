@@ -190,22 +190,29 @@ case "$cmd" in
   sync)
     in_repo || die "sync must run inside a git repo"
     remote=${1:-origin}
-    git rev-parse --verify "$DECIDE_REF" >/dev/null 2>&1 \
-      || die "no local notes at $DECIDE_REF yet — record a decision first"
     refspec="$DECIDE_REF:$DECIDE_REF"
+    has_local() { ng rev-parse --verify -q "$DECIDE_REF" >/dev/null 2>&1; }
     # Fetch the remote's notes into a temp ref, then union-merge so concurrent
     # decisions on the same commit are both kept (prose stays intact, unlike
-    # cat_sort_uniq which would shuffle lines). Tolerate a remote with no notes.
+    # cat_sort_uniq which would shuffle lines). A remote with no notes yet is
+    # fine (ls-remote exits 2); an unreachable remote is not.
     tmpref="refs/notes/bm-sync-tmp"
-    if ng fetch -q "$remote" "+$DECIDE_REF:$tmpref" 2>/dev/null \
-       && ng rev-parse --verify "$tmpref" >/dev/null 2>&1; then
-      if ! ng notes --ref="$DECIDE_REF" merge -s union "$tmpref" >/dev/null 2>&1; then
+    if ng ls-remote --exit-code "$remote" "$DECIDE_REF" >/dev/null 2>&1; then
+      ng fetch -q "$remote" "+$DECIDE_REF:$tmpref" || die "fetch from $remote failed"
+      if ! has_local; then
+        # nothing local yet (fresh clone): adopt the remote's notes as-is
+        ng update-ref "$DECIDE_REF" "$tmpref"
+      elif ! ng notes --ref="$DECIDE_REF" merge -s union "$tmpref" >/dev/null 2>&1; then
         ng notes --ref="$DECIDE_REF" merge --abort >/dev/null 2>&1 || true
         ng update-ref -d "$tmpref" 2>/dev/null || true
         die "notes merge conflict on sync — resolve manually, then re-run"
       fi
       ng update-ref -d "$tmpref" 2>/dev/null || true
+    else
+      rc=$?
+      [ "$rc" -eq 2 ] || die "cannot reach $remote"
     fi
+    has_local || die "no decision notes locally or on $remote — record a decision first"
     ng push -q "$remote" "$refspec" || die "push to $remote failed"
     log "synced decision notes with $remote"
     ;;
